@@ -1,0 +1,14 @@
+fastapi==0.118.0
+uvicorn[standard]==0.37.0
+python-multipart==0.0.20
+pydantic==2.11.10
+passlib[bcrypt]==1.7.4
+python-jose==3.5.0
+sqlmodel==0.0.25
+PyMuPDF==1.26.4
+numpy==2.3.3
+scikit-learn==1.7.2
+networkx==3.5
+pyttsx3==2.99
+# Optional Kokoro (install from GitHub if needed)
+# kokoro
