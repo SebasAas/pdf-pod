@@ -1,18 +1,13 @@
 "use client";
-import { useState, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { apiBase, authHeader } from "@/lib/api";
 
-interface Voice {
-  name: string;
-  displayName: string;
-}
-
-interface Episode {
+type Episode = {
   id: number;
   title: string;
   status: string;
   duration_sec: number;
-}
+};
 
 interface ScriptSection {
   id: number;
@@ -32,672 +27,287 @@ interface Script {
   status: string;
   created_at: string;
 }
-
 export default function Dashboard() {
-  const [file, setFile] = useState<File | null>(null);
-  const [voices, setVoices] = useState<Voice[]>([]);
+  const [voices, setVoices] = useState<string[]>([]);
   const [selectedVoice, setSelectedVoice] = useState<string>("");
-  const [targetMinutes, setTargetMinutes] = useState<number>(10);
-  const [style, setStyle] = useState<string>("conversational");
   const [episodes, setEpisodes] = useState<Episode[]>([]);
-  const [currentScript, setCurrentScript] = useState<Script | null>(null);
-  const [extractedText, setExtractedText] = useState<string>("");
-  const [isUploading, setIsUploading] = useState(false);
-  const [isExtracting, setIsExtracting] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [isGeneratingAudio, setIsGeneratingAudio] = useState(false);
+  const [minutes, setMinutes] = useState(10);
+  const [msg, setMsg] = useState("");
   const [uploadId, setUploadId] = useState<number | null>(null);
-  const [error, setError] = useState<string>("");
+  const [draftId, setDraftId] = useState<number | null>(null);
+  const [refinedText, setRefinedText] = useState<string>("");
+  const [currentScript, setCurrentScript] = useState<Script | null>(null);
   const [editingSection, setEditingSection] = useState<number | null>(null);
   const [editingContent, setEditingContent] = useState<string>("");
-  const [currentStep, setCurrentStep] = useState<
-    "upload" | "extract" | "script" | "audio"
-  >("upload");
+  const [step, setStep] = useState<
+    "idle" | "uploaded" | "draft_ready" | "generating"
+  >("idle");
 
-  // Cargar voces disponibles
   useEffect(() => {
     fetch(`${apiBase()}/voices`)
-      .then((res) => res.json())
-      .then((data) => {
-        const voiceOptions = data.voices.map((voice: string) => ({
-          name: voice,
-          displayName: voice.replace("_", " ").toUpperCase(),
-        }));
-        setVoices(voiceOptions);
-        if (voiceOptions.length > 0) {
-          setSelectedVoice(voiceOptions[0].name);
+      .then((r) => r.json())
+      .then((d) => {
+        setVoices(d.voices || []);
+        if (!d.kokoro_available) {
+          setMsg(
+            "Nota: Kokoro TTS no está disponible. Se está usando pyttsx3 como alternativa."
+          );
         }
-      })
-      .catch((err) => console.error("Error loading voices:", err));
+      });
+    refreshEpisodes();
   }, []);
 
-  // Cargar episodios existentes
-  useEffect(() => {
-    const token = localStorage.getItem("token");
-    if (token) {
-      // Cargar episodios
-      fetch(`${apiBase()}/episodes`, {
-        headers: authHeader(),
-      })
-        .then((res) => res.json())
-        .then((data) => setEpisodes(data))
-        .catch((err) => console.error("Error loading episodes:", err));
-    }
-  }, []);
-
-  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0];
-    if (selectedFile && selectedFile.type === "application/pdf") {
-      setFile(selectedFile);
-      setError("");
-    } else {
-      setError("Por favor selecciona un archivo PDF válido");
-    }
+  const refreshEpisodes = async () => {
+    const r = await fetch(`${apiBase()}/episodes`);
+    if (r.ok) setEpisodes(await r.json());
   };
 
-  const handleUpload = async () => {
-    if (!file) {
-      setError("Por favor selecciona un archivo PDF");
+  const onUpload = async (e: any) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const form = new FormData();
+    form.append("file", file);
+    const r = await fetch(`${apiBase()}/uploads`, {
+      method: "POST",
+      body: form,
+    });
+    if (!r.ok) {
+      setMsg("Error subiendo archivo");
       return;
     }
+    const { upload_id } = await r.json();
+    setUploadId(upload_id);
+    setStep("uploaded");
+    setMsg("Archivo subido. Generando script con secciones...");
 
-    setIsUploading(true);
-    setError("");
-
-    const formData = new FormData();
-    formData.append("file", file);
-
-    try {
-      const response = await fetch(`${apiBase()}/uploads`, {
-        method: "POST",
-        headers: authHeader(),
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error("Error al subir el archivo");
-      }
-
-      const data = await response.json();
-      setUploadId(data.upload_id);
-      setIsUploading(false);
-      setCurrentStep("extract");
-    } catch (err) {
-      setError("Error al subir el archivo");
-      setIsUploading(false);
-    }
-  };
-
-  const handleExtractText = async () => {
-    if (!uploadId) {
-      setError("Primero debes subir un archivo");
+    // Generar script con secciones usando el endpoint /generate-script
+    const processResponse = await fetch(`${apiBase()}/generate-script`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        upload_id,
+        target_minutes: minutes,
+        style: "conversational",
+        voice: selectedVoice || "em_santa",
+      }),
+    });
+    if (!processResponse.ok) {
+      setMsg("No se pudo generar script");
       return;
     }
-
-    setIsExtracting(true);
-    setError("");
-
-    try {
-      const response = await fetch(`${apiBase()}/extract-text`, {
-        method: "POST",
-        headers: {
-          ...authHeader(),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          upload_id: uploadId,
-          target_minutes: targetMinutes,
-          style: style,
-          voice: selectedVoice,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Error al extraer texto del PDF");
-      }
-
-      const data = await response.json();
-      setExtractedText(data.extracted_text);
-      setIsExtracting(false);
-      setCurrentStep("script");
-    } catch (err) {
-      setError("Error al extraer texto del PDF");
-      setIsExtracting(false);
-    }
+    const scriptData = await processResponse.json();
+    // Crear objeto Script con secciones
+    const script: Script = {
+      id: Date.now(), // ID temporal
+      title: scriptData.title,
+      script_content: scriptData.script_content,
+      sections: scriptData.sections || [],
+      target_minutes: scriptData.target_minutes,
+      style: scriptData.style,
+      voice: scriptData.voice,
+      status: "draft",
+      created_at: new Date().toISOString(),
+    };
+    setCurrentScript(script);
+    setStep("draft_ready");
+    setMsg(
+      "Script generado con secciones. Podés editar cada sección individualmente."
+    );
   };
 
-  const handleProcess = async () => {
-    if (!uploadId) {
-      setError("Primero debes subir un archivo");
-      return;
-    }
-
-    setIsProcessing(true);
-    setError("");
-
-    try {
-      const response = await fetch(`${apiBase()}/process`, {
-        method: "POST",
-        headers: {
-          ...authHeader(),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          upload_id: uploadId,
-          target_minutes: targetMinutes,
-          style: style,
-          voice: selectedVoice,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Error al procesar el archivo");
-      }
-
-      const data = await response.json();
-
-      // Establecer el script actual directamente desde la respuesta
-      setCurrentScript({
-        id: 0, // No usamos ID por ahora
-        title: data.title,
-        script_content: data.script_content,
-        sections: data.sections,
-        target_minutes: data.target_minutes,
-        style: data.style,
-        voice: data.voice,
-        status: "script_generated",
-        created_at: new Date().toISOString(),
-      });
-
-      setIsProcessing(false);
-      setCurrentStep("audio");
-
-      // Limpiar el input de archivo
-      const fileInput = document.getElementById("pdf-file") as HTMLInputElement;
-      if (fileInput) fileInput.value = "";
-    } catch (err) {
-      setError("Error al procesar el archivo");
-      setIsProcessing(false);
-    }
-  };
-
-  const playEpisode = (episodeId: number) => {
-    const audioUrl = `${apiBase()}/episodes/${episodeId}/audio`;
-    const audio = new Audio(audioUrl);
-    audio.play();
-  };
-
-  const handleEditSection = (sectionId: number, content: string) => {
+  const startEditingSection = (sectionId: number, content: string) => {
     setEditingSection(sectionId);
     setEditingContent(content);
   };
 
-  const handleSaveSection = async () => {
+  const saveSectionEdit = () => {
     if (!currentScript || editingSection === null) return;
 
-    // Actualizar la sección localmente
-    const updatedSections = currentScript.sections.map((section) => {
-      if (section.id === editingSection) {
-        return { ...section, content: editingContent };
-      }
-      return section;
-    });
-
-    // Reconstruir el script content
-    const updatedScriptContent = updatedSections
-      .map((section) => section.content)
-      .join("\n\n");
+    const updatedSections = currentScript.sections.map((section) =>
+      section.id === editingSection
+        ? { ...section, content: editingContent }
+        : section
+    );
 
     setCurrentScript({
       ...currentScript,
       sections: updatedSections,
-      script_content: updatedScriptContent,
     });
 
     setEditingSection(null);
     setEditingContent("");
+    setMsg("Sección actualizada");
   };
 
-  const handleGenerateAudio = async () => {
-    if (!currentScript) return;
+  const cancelSectionEdit = () => {
+    setEditingSection(null);
+    setEditingContent("");
+  };
 
-    setIsGeneratingAudio(true);
-    setError("");
-
-    try {
-      const response = await fetch(`${apiBase()}/generate-audio`, {
-        method: "POST",
-        headers: {
-          ...authHeader(),
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          script_content: currentScript.script_content,
-          title: currentScript.title,
-          voice: currentScript.voice,
-          target_minutes: currentScript.target_minutes,
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error("Error al generar el audio");
-      }
-
-      const data = await response.json();
-
-      // Recargar episodios
-      const episodesResponse = await fetch(`${apiBase()}/episodes`, {
-        headers: authHeader(),
-      });
-      const episodesData = await episodesResponse.json();
-      setEpisodes(episodesData);
-
-      setIsGeneratingAudio(false);
-      setCurrentScript(null);
-      alert("¡Audio generado exitosamente!");
-    } catch (err) {
-      setError("Error al generar el audio");
-      setIsGeneratingAudio(false);
+  const generateAudio = async () => {
+    if (!currentScript || !uploadId) {
+      setMsg("Falta script o upload");
+      return;
     }
+    setStep("generating");
+
+    // Combinar todas las secciones en un script completo
+    const fullScript = currentScript.sections
+      .map((section) => `## ${section.title}\n\n${section.content}`)
+      .join("\n\n");
+
+    const p = await fetch(`${apiBase()}/process`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        upload_id: uploadId,
+        text_override: fullScript,
+        target_minutes: minutes,
+        style: "conversational",
+        voice: selectedVoice || "em_santa",
+      }),
+    });
+    setMsg(p.ok ? "Episodio creado" : "Error procesando");
+    await refreshEpisodes();
+    setStep("idle");
+    setCurrentScript(null);
   };
 
   return (
     <main>
-      <h1>🎧 Dashboard - StudyPodcast</h1>
+      <h2>Panel</h2>
+      <section style={{ display: "grid", gap: 8, maxWidth: 900 }}>
+        <label>
+          Voz:
+          <select
+            value={selectedVoice}
+            onChange={(e) => setSelectedVoice(e.target.value)}
+          >
+            <option value="">Por defecto</option>
+            {voices.map((v) => (
+              <option key={v} value={v}>
+                {v}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label>
+          Duración objetivo (min):
+          <input
+            type="number"
+            min={3}
+            max={30}
+            value={minutes}
+            onChange={(e) => setMinutes(parseInt(e.target.value || "10"))}
+          />
+        </label>
 
-      <div
-        style={{
-          marginBottom: "2rem",
-          padding: "1rem",
-          border: "1px solid #ddd",
-          borderRadius: "8px",
-        }}
-      >
-        <h2>Crear nuevo podcast</h2>
+        <div style={{ border: "1px solid #ddd", padding: 12, borderRadius: 8 }}>
+          <h3>1) Subir archivo</h3>
+          <input type="file" accept=".pdf,.txt" onChange={onUpload} />
+          <p>{msg}</p>
+        </div>
 
-        {/* Paso 1: Subir PDF */}
-        {currentStep === "upload" && (
-          <div>
-            <h3>Paso 1: Subir archivo PDF</h3>
-            <div style={{ marginBottom: "1rem" }}>
-              <label
-                htmlFor="pdf-file"
-                style={{ display: "block", marginBottom: "0.5rem" }}
-              >
-                Seleccionar archivo PDF:
-              </label>
-              <input
-                id="pdf-file"
-                type="file"
-                accept=".pdf"
-                onChange={handleFileChange}
-                style={{ marginBottom: "0.5rem" }}
-              />
-              {file && <p>Archivo seleccionado: {file.name}</p>}
-            </div>
-
-            {error && (
-              <div style={{ color: "red", marginBottom: "1rem" }}>{error}</div>
-            )}
-
-            <button
-              onClick={handleUpload}
-              disabled={!file || isUploading}
-              style={{
-                padding: "0.75rem 1.5rem",
-                backgroundColor: isUploading ? "#ccc" : "#007bff",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: isUploading ? "not-allowed" : "pointer",
-              }}
-            >
-              {isUploading ? "Subiendo..." : "Subir PDF"}
-            </button>
-          </div>
-        )}
-
-        {/* Paso 2: Extraer texto */}
-        {currentStep === "extract" && (
-          <div>
-            <h3>Paso 2: Extraer texto del PDF</h3>
+        {step !== "idle" && currentScript && (
+          <div
+            style={{ border: "1px solid #ddd", padding: 12, borderRadius: 8 }}
+          >
+            <h3>2) Revisar y editar script por secciones</h3>
             <p>
-              El archivo se ha subido correctamente. Ahora vamos a extraer el
-              texto para que puedas verificar que esté correcto.
+              <strong>Título:</strong> {currentScript.title}
+            </p>
+            <p>
+              <strong>Duración objetivo:</strong> {currentScript.target_minutes}{" "}
+              minutos
             </p>
 
-            {error && (
-              <div style={{ color: "red", marginBottom: "1rem" }}>{error}</div>
-            )}
-
-            <button
-              onClick={handleExtractText}
-              disabled={isExtracting}
-              style={{
-                padding: "0.75rem 1.5rem",
-                backgroundColor: isExtracting ? "#ccc" : "#28a745",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: isExtracting ? "not-allowed" : "pointer",
-              }}
-            >
-              {isExtracting ? "Extrayendo texto..." : "Extraer Texto"}
-            </button>
-          </div>
-        )}
-
-        {/* Paso 3: Verificar texto extraído */}
-        {currentStep === "script" && (
-          <div>
-            <h3>Paso 3: Verificar texto extraído</h3>
-            <p>
-              Revisa el texto extraído del PDF. Si está correcto, puedes
-              proceder a generar el script del podcast.
-            </p>
-
-            <div style={{ marginBottom: "1rem" }}>
-              <label
-                htmlFor="voice-select"
-                style={{ display: "block", marginBottom: "0.5rem" }}
-              >
-                Seleccionar voz:
-              </label>
-              <select
-                id="voice-select"
-                value={selectedVoice}
-                onChange={(e) => setSelectedVoice(e.target.value)}
-                style={{
-                  padding: "0.5rem",
-                  borderRadius: "4px",
-                  border: "1px solid #ccc",
-                }}
-              >
-                {voices.map((voice) => (
-                  <option key={voice.name} value={voice.name}>
-                    {voice.displayName}
-                  </option>
+            <div style={{ marginTop: "1rem" }}>
+              <h4>Secciones del Script:</h4>
+              {currentScript.sections &&
+                currentScript.sections.map((section) => (
+                  <div
+                    key={section.id}
+                    style={{
+                      marginBottom: "1rem",
+                      padding: "1rem",
+                      border: "1px solid #ccc",
+                      borderRadius: "4px",
+                      backgroundColor: "white",
+                    }}
+                  >
+                    <h5>
+                      {section.title} ({section.estimated_duration} min)
+                    </h5>
+                    {editingSection === section.id ? (
+                      <div>
+                        <textarea
+                          value={editingContent}
+                          onChange={(e) => setEditingContent(e.target.value)}
+                          style={{
+                            width: "100%",
+                            minHeight: "100px",
+                            padding: "0.5rem",
+                            border: "1px solid #ccc",
+                            borderRadius: "4px",
+                          }}
+                        />
+                        <div style={{ marginTop: "0.5rem" }}>
+                          <button
+                            onClick={saveSectionEdit}
+                            style={{ marginRight: "0.5rem" }}
+                          >
+                            Guardar
+                          </button>
+                          <button onClick={cancelSectionEdit}>Cancelar</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div>
+                        <p
+                          style={{
+                            whiteSpace: "pre-wrap",
+                            marginBottom: "0.5rem",
+                          }}
+                        >
+                          {section.content}
+                        </p>
+                        <button
+                          onClick={() =>
+                            startEditingSection(section.id, section.content)
+                          }
+                        >
+                          Editar sección
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 ))}
-              </select>
             </div>
 
-            <div style={{ marginBottom: "1rem" }}>
-              <label
-                htmlFor="minutes"
-                style={{ display: "block", marginBottom: "0.5rem" }}
-              >
-                Duración objetivo (minutos):
-              </label>
-              <input
-                id="minutes"
-                type="number"
-                min="5"
-                max="30"
-                value={targetMinutes}
-                onChange={(e) => setTargetMinutes(Number(e.target.value))}
-                style={{
-                  padding: "0.5rem",
-                  borderRadius: "4px",
-                  border: "1px solid #ccc",
-                }}
-              />
-            </div>
-
-            <div style={{ marginBottom: "1rem" }}>
-              <label
-                htmlFor="style"
-                style={{ display: "block", marginBottom: "0.5rem" }}
-              >
-                Estilo:
-              </label>
-              <select
-                id="style"
-                value={style}
-                onChange={(e) => setStyle(e.target.value)}
-                style={{
-                  padding: "0.5rem",
-                  borderRadius: "4px",
-                  border: "1px solid #ccc",
-                }}
-              >
-                <option value="conversational">Conversacional</option>
-                <option value="formal">Formal</option>
-                <option value="casual">Casual</option>
-              </select>
-            </div>
-
-            <div style={{ marginBottom: "1rem" }}>
-              <h4>Texto extraído:</h4>
-              <textarea
-                value={extractedText}
-                onChange={(e) => setExtractedText(e.target.value)}
-                style={{
-                  width: "100%",
-                  minHeight: "200px",
-                  padding: "0.5rem",
-                  border: "1px solid #ccc",
-                  borderRadius: "4px",
-                }}
-                placeholder="El texto extraído aparecerá aquí..."
-              />
-            </div>
-
-            {error && (
-              <div style={{ color: "red", marginBottom: "1rem" }}>{error}</div>
-            )}
-
-            <div style={{ display: "flex", gap: "1rem" }}>
-              <button
-                onClick={handleProcess}
-                disabled={isProcessing}
-                style={{
-                  padding: "0.75rem 1.5rem",
-                  backgroundColor: isProcessing ? "#ccc" : "#28a745",
-                  color: "white",
-                  border: "none",
-                  borderRadius: "4px",
-                  cursor: isProcessing ? "not-allowed" : "pointer",
-                }}
-              >
-                {isProcessing
-                  ? "Generando Script..."
-                  : "Generar Script de Podcast"}
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={generateAudio} disabled={step === "generating"}>
+                3) Generar audio
               </button>
             </div>
           </div>
         )}
-      </div>
+      </section>
 
-      {/* Sección del Script */}
-      {currentScript && (
-        <div
-          style={{
-            marginBottom: "2rem",
-            padding: "1rem",
-            border: "1px solid #ddd",
-            borderRadius: "8px",
-            backgroundColor: "#f9f9f9",
-          }}
-        >
-          <h2>📝 Script del Podcast: {currentScript.title}</h2>
-          <p>
-            <strong>Estilo:</strong> {currentScript.style} |{" "}
-            <strong>Voz:</strong> {currentScript.voice} |{" "}
-            <strong>Duración objetivo:</strong> {currentScript.target_minutes}{" "}
-            minutos
-          </p>
-
-          <div style={{ marginBottom: "1rem" }}>
-            <h3>Secciones del Script:</h3>
-            {currentScript.sections &&
-              currentScript.sections.map((section) => (
-                <div
-                  key={section.id}
-                  style={{
-                    marginBottom: "1rem",
-                    padding: "1rem",
-                    border: "1px solid #ccc",
-                    borderRadius: "4px",
-                    backgroundColor: "white",
-                  }}
-                >
-                  <h4>
-                    {section.title} ({section.estimated_duration} min)
-                  </h4>
-                  {editingSection === section.id ? (
-                    <div>
-                      <textarea
-                        value={editingContent}
-                        onChange={(e) => setEditingContent(e.target.value)}
-                        style={{
-                          width: "100%",
-                          minHeight: "100px",
-                          padding: "0.5rem",
-                          border: "1px solid #ccc",
-                          borderRadius: "4px",
-                        }}
-                      />
-                      <div style={{ marginTop: "0.5rem" }}>
-                        <button
-                          onClick={handleSaveSection}
-                          style={{
-                            padding: "0.5rem 1rem",
-                            backgroundColor: "#28a745",
-                            color: "white",
-                            border: "none",
-                            borderRadius: "4px",
-                            cursor: "pointer",
-                            marginRight: "0.5rem",
-                          }}
-                        >
-                          Guardar
-                        </button>
-                        <button
-                          onClick={() => {
-                            setEditingSection(null);
-                            setEditingContent("");
-                          }}
-                          style={{
-                            padding: "0.5rem 1rem",
-                            backgroundColor: "#6c757d",
-                            color: "white",
-                            border: "none",
-                            borderRadius: "4px",
-                            cursor: "pointer",
-                          }}
-                        >
-                          Cancelar
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <div>
-                      <p style={{ whiteSpace: "pre-wrap" }}>
-                        {section.content}
-                      </p>
-                      <button
-                        onClick={() =>
-                          handleEditSection(section.id, section.content)
-                        }
-                        style={{
-                          padding: "0.25rem 0.5rem",
-                          backgroundColor: "#007bff",
-                          color: "white",
-                          border: "none",
-                          borderRadius: "4px",
-                          cursor: "pointer",
-                          fontSize: "0.8rem",
-                        }}
-                      >
-                        ✏️ Editar
-                      </button>
-                    </div>
-                  )}
-                </div>
-              ))}
-          </div>
-
-          <div style={{ display: "flex", gap: "1rem" }}>
-            <button
-              onClick={handleGenerateAudio}
-              disabled={isGeneratingAudio}
-              style={{
-                padding: "0.75rem 1.5rem",
-                backgroundColor: isGeneratingAudio ? "#ccc" : "#dc3545",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: isGeneratingAudio ? "not-allowed" : "pointer",
-              }}
-            >
-              {isGeneratingAudio
-                ? "Generando Audio..."
-                : "🎵 Generar Audio Final"}
-            </button>
-            <button
-              onClick={() => setCurrentScript(null)}
-              style={{
-                padding: "0.75rem 1.5rem",
-                backgroundColor: "#6c757d",
-                color: "white",
-                border: "none",
-                borderRadius: "4px",
-                cursor: "pointer",
-              }}
-            >
-              Cerrar Script
-            </button>
-          </div>
-        </div>
-      )}
-
-      <div>
-        <h2>🎧 Mis Podcasts</h2>
-        {episodes.length === 0 ? (
-          <p>No tienes podcasts generados aún.</p>
-        ) : (
-          <div>
-            {episodes.map((episode) => (
-              <div
-                key={episode.id}
-                style={{
-                  padding: "1rem",
-                  border: "1px solid #ddd",
-                  borderRadius: "8px",
-                  marginBottom: "1rem",
-                  display: "flex",
-                  justifyContent: "space-between",
-                  alignItems: "center",
-                }}
-              >
-                <div>
-                  <h3>{episode.title}</h3>
-                  <p>Estado: {episode.status}</p>
-                  <p>
-                    Duración: {Math.round(episode.duration_sec / 60)} minutos
-                  </p>
-                </div>
-                <button
-                  onClick={() => playEpisode(episode.id)}
-                  disabled={episode.status !== "ready"}
-                  style={{
-                    padding: "0.5rem 1rem",
-                    backgroundColor:
-                      episode.status === "ready" ? "#007bff" : "#ccc",
-                    color: "white",
-                    border: "none",
-                    borderRadius: "4px",
-                    cursor:
-                      episode.status === "ready" ? "pointer" : "not-allowed",
-                  }}
-                >
-                  ▶️ Reproducir
-                </button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      <h3 style={{ marginTop: 24 }}>Tus episodios</h3>
+      <ul>
+        {episodes.map((ep) => (
+          <li key={ep.id} style={{ margin: "8px 0" }}>
+            <b>{ep.title}</b> — {ep.status}
+            {ep.status === "ready" && (
+              <audio
+                controls
+                src={`${apiBase()}/episodes/${ep.id}/audio`}
+                style={{ display: "block", marginTop: 4 }}
+              />
+            )}
+          </li>
+        ))}
+      </ul>
     </main>
   );
 }

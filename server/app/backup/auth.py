@@ -3,8 +3,10 @@ from datetime import datetime, timedelta
 from typing import Optional
 from jose import jwt, JWTError
 from passlib.hash import bcrypt
+from sqlmodel import select
 from fastapi import HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from .db import User, get_session
 
 JWT_SECRET = os.getenv("JWT_SECRET", "dev_secret_change_me")
 JWT_EXPIRE_MIN = int(os.getenv("JWT_EXPIRE_MIN", "4320"))
